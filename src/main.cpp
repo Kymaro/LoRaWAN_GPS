@@ -1,28 +1,12 @@
-#include <Arduino.h>
-
-#include <TinyGPSPlus.h>
-#include <SoftwareSerial.h>
 #include <ESP32_LoRaWAN.h>
-/*
-   This sample code demonstrates the normal use of a TinyGPSPlus (TinyGPSPlus) object.
-   It requires the use of SoftwareSerial, and assumes that you have a
-   9600-baud serial GPS device hooked up on pins 16(rx) and 17(tx).
-*/
-static const int RXPin = 16, TXPin = 17;
+#include <Arduino.h>
+#include <TinyGPSPlus.h>
+
+// GPS SETUP CODE 
+static const int RXPin = 22, TXPin = 23;
 static const uint32_t GPSBaud = 9600;
 
-static void smartDelay(unsigned long ms);
-static void printInt(unsigned long val, bool valid, int len);
-static void printFloat(float val, bool valid, int len, int prec);
-static void printDateTime(TinyGPSDate &d, TinyGPSTime &t);
-static void printStr(const char *str, int len);
-
-// The TinyGPSPlus object
 TinyGPSPlus gps;
-
-// The serial connection to the GPS device
-SoftwareSerial ss(RXPin, TXPin);
-
 
 /*license for Heltec ESP32 LoRaWan, quary your ChipID relevant license: http://resource.heltec.cn/search */
 uint32_t  license[4] = {0xB46C55E0,0x184E9C8B,0x5B1C0411,0xA5284D3D};
@@ -59,88 +43,153 @@ bool isTxConfirmed = true;
 /* Application port */
 uint8_t appPort = 2;
 
+/*!
+* Number of trials to transmit the frame, if the LoRaMAC layer did not
+* receive an acknowledgment. The MAC performs a datarate adaptation,
+* according to the LoRaWAN Specification V1.0.2, chapter 18.4, according
+* to the following table:
+*
+* Transmission nb | Data Rate
+* ----------------|-----------
+* 1 (first)       | DR
+* 2               | DR
+* 3               | max(DR-1,0)
+* 4               | max(DR-1,0)
+* 5               | max(DR-2,0)
+* 6               | max(DR-2,0)
+* 7               | max(DR-3,0)
+* 8               | max(DR-3,0)
+*
+* Note, that if NbTrials is set to 1 or 2, the MAC will not decrease
+* the datarate, in case the LoRaMAC layer did not receive an acknowledgment
+*/
 uint8_t confirmedNbTrials = 8;
 
 /*LoraWan debug level, select in arduino IDE tools.
 * None : print basic info.
 * Freq : print Tx and Rx freq, DR info.
 * Freq && DIO : print Tx and Rx freq, DR, DIO0 interrupt and DIO1 interrupt info.
-* Freq && DIO && PW: print Tx and Rx freq, DR, DIO0 interrupt, DIO1 interrupt and MCU deepsleep info.
+* Freq && DIO && PW: print Tx and Rx freq, DR, DIO0 interrupt, DIO1 interrupt, MCU sleep and MCU wake info.
 */
 uint8_t debugLevel = LoRaWAN_DEBUG_LEVEL;
 
 /*LoraWan region, select in arduino IDE tools*/
 LoRaMacRegion_t loraWanRegion = ACTIVE_REGION;
 
-static uint8_t prepareTxFrame( uint8_t port )
+double LAT = 0;
+double LNG = 0;
+String LATStr;
+String LNGStr;
+int decimal = 6;
+// String (double, nbDecimal)
+// String.length() for len
+unsigned char *puc;
+
+
+static void prepareTxFrame( uint8_t port )
 {
+    while (Serial2.available() > 0)
+    {
+        if (gps.encode(Serial2.read()))
+        {
+            Serial.print(F("Location: ")); 
+            if (gps.location.isValid())
+            {
+                Serial.print(gps.location.lat(), 6);
+                LAT = gps.location.lat();
+                LATStr = String(LAT, decimal);
+                Serial.print(F(","));
+                Serial.print(gps.location.lng(), 6);
+                LNG = gps.location.lng();
+                LNGStr = String(LNG, decimal);
 
-  smartDelay(1000);
-  if (millis() > 5000 && gps.charsProcessed() < 10)
-  {
-    Serial.println(F("No GPS data received: check wiring"));
-  }
-  if(!gps.satellites.isValid() || !gps.location.isValid() || !gps.hdop.isValid() || gps.satellites.isValid())
-  {
-    return 0;
-  }
+                appDataSize = LATStr.length() + LNGStr.length() + 2;//AppDataSize max value is 64
+                appData[0] = 'H';
+                puc = (unsigned char *)(&LATStr);
+                for(int i=1; i < LATStr.length() + 1; i++)
+                {
+                  appData[i] = puc[i-1];
+                }
+                appData[LATStr.length() + 1] = 'L';
+                puc = (unsigned char *)(&LNGStr);
+                for(int i=LATStr.length() + 2; i < appDataSize; i++)
+                {
+                  appData[i] = puc[i - (LATStr.length() + 2)];
+                }
+            }
+            else
+            {
+                Serial.print(F("INVALID"));
+                appDataSize = 4;
+                appData[0] = 'S';
+                appData[1] = 'U';
+                appData[2] = 'U';
+                appData[3] = 'S';
+            }
 
-  uint32_t SAT = gps.satellites.value();
-  float LAT = gps.location.lat();
-  float LNG = gps.location.lng();
-  float HDOP = gps.hdop.hdop();
+            Serial.print(F("  Date/Time: "));
+            if (gps.date.isValid())
+            {
+                Serial.print(gps.date.month());
+                Serial.print(F("/"));
+                Serial.print(gps.date.day());
+                Serial.print(F("/"));
+                Serial.print(gps.date.year());
+            }
+            else
+            {
+                Serial.print(F("INVALID"));
+            }
 
-  unsigned char *puc;
-  appDataSize = 16;
+            Serial.print(F(" "));
+            if (gps.time.isValid())
+            {
+                if (gps.time.hour() < 10) Serial.print(F("0"));
+                Serial.print(gps.time.hour());
+                Serial.print(F(":"));
+                if (gps.time.minute() < 10) Serial.print(F("0"));
+                Serial.print(gps.time.minute());
+                Serial.print(F(":"));
+                if (gps.time.second() < 10) Serial.print(F("0"));
+                Serial.print(gps.time.second());
+                Serial.print(F("."));
+                if (gps.time.centisecond() < 10) Serial.print(F("0"));
+                Serial.print(gps.time.centisecond());
+            }
+            else
+            {
+                Serial.print(F("INVALID"));
+            }
 
-  puc = (unsigned char *)(&SAT);
-  appData[0] = puc[0];
-  appData[1] = puc[1];
-  appData[2] = puc[2];
-  appData[3] = puc[3];
+            Serial.println();
+        }
+    }
 
-  puc = (unsigned char *)(&HDOP);
-  appData[4] = puc[0];
-  appData[5] = puc[1];
-  appData[6] = puc[2];
-  appData[7] = puc[3];
-
-  puc = (unsigned char *)(&LAT);
-  appData[8] = puc[0];
-  appData[9] = puc[1];
-  appData[10] = puc[2];
-  appData[11] = puc[3];
-
-  puc = (unsigned char *)(&LNG);
-  appData[12] = puc[0];
-  appData[13] = puc[1];
-  appData[14] = puc[2];
-  appData[15] = puc[3];
-
-  Serial.print("SAT = ");
-  Serial.println(SAT);
-  Serial.print("LAT = ");
-  Serial.println(LAT);
-  Serial.print("LNG = ");
-  Serial.println(LNG);
-  Serial.print("HDOP = ");
-  Serial.println(HDOP);
-
-  return SAT;
+    if (millis() > 5000 && gps.charsProcessed() < 10)
+    {
+        Serial.println(F("No GPS detected: check wiring."));
+        while(true);
+    }
 }
 
+// Add your initialization code here
 void setup()
 {
+  if(mcuStarted==0)
+  {
+    LoRaWAN.displayMcuInit();
+  }
   Serial.begin(115200);
-  ss.begin(GPSBaud);
+  while (!Serial);
+  Serial2.begin(GPSBaud, SERIAL_8N1, RXPin, TXPin);
   SPI.begin(SCK,MISO,MOSI,SS);
   Mcu.init(SS,RST_LoRa,DIO0,DIO1,license);
   deviceState = DEVICE_STATE_INIT;
 }
 
+// The loop function is called in an endless loop
 void loop()
 {
-
   switch( deviceState )
   {
     case DEVICE_STATE_INIT:
@@ -150,19 +199,15 @@ void loop()
     }
     case DEVICE_STATE_JOIN:
     {
+      LoRaWAN.displayJoining();
       LoRaWAN.join();
       break;
     }
     case DEVICE_STATE_SEND:
     {
-      uint32_t satel = prepareTxFrame( appPort );
-      Serial.println(satel);
-      if(satel==0)
-      {
-        Serial.println("NO SAT");
-        deviceState = DEVICE_STATE_CYCLE;
-        break;
-      }
+      LoRaWAN.displaySending();
+      prepareTxFrame( appPort );
+      //displayInfo();
       LoRaWAN.send(loraWanClass);
       deviceState = DEVICE_STATE_CYCLE;
       break;
@@ -177,6 +222,7 @@ void loop()
     }
     case DEVICE_STATE_SLEEP:
     {
+      LoRaWAN.displayAck();
       LoRaWAN.sleep(loraWanClass,debugLevel);
       break;
     }
@@ -186,86 +232,4 @@ void loop()
       break;
     }
   }
-}
-
-// This custom version of delay() ensures that the gps object
-// is being "fed".
-static void smartDelay(unsigned long ms)
-{
-  unsigned long start = millis();
-  do 
-  {
-    while (ss.available())
-      gps.encode(ss.read());
-  } while (millis() - start < ms);
-}
-
-static void printFloat(float val, bool valid, int len, int prec)
-{
-  if (!valid)
-  {
-    while (len-- > 1)
-      Serial.print('*');
-    Serial.print(' ');
-  }
-  else
-  {
-    Serial.print(val, prec);
-    int vi = abs((int)val);
-    int flen = prec + (val < 0.0 ? 2 : 1); // . and -
-    flen += vi >= 1000 ? 4 : vi >= 100 ? 3 : vi >= 10 ? 2 : 1;
-    for (int i=flen; i<len; ++i)
-      Serial.print(' ');
-  }
-  smartDelay(0);
-}
-
-static void printInt(unsigned long val, bool valid, int len)
-{
-  char sz[32] = "*****************";
-  if (valid)
-    sprintf(sz, "%ld", val);
-  sz[len] = 0;
-  for (int i=strlen(sz); i<len; ++i)
-    sz[i] = ' ';
-  if (len > 0) 
-    sz[len-1] = ' ';
-  Serial.print(sz);
-  smartDelay(0);
-}
-
-static void printDateTime(TinyGPSDate &d, TinyGPSTime &t)
-{
-  if (!d.isValid())
-  {
-    Serial.print(F("********** "));
-  }
-  else
-  {
-    char sz[32];
-    sprintf(sz, "%02d/%02d/%02d ", d.month(), d.day(), d.year());
-    Serial.print(sz);
-  }
-  
-  if (!t.isValid())
-  {
-    Serial.print(F("******** "));
-  }
-  else
-  {
-    char sz[32];
-    sprintf(sz, "%02d:%02d:%02d ", t.hour(), t.minute(), t.second());
-    Serial.print(sz);
-  }
-
-  printInt(d.age(), d.isValid(), 5);
-  smartDelay(0);
-}
-
-static void printStr(const char *str, int len)
-{
-  int slen = strlen(str);
-  for (int i=0; i<len; ++i)
-    Serial.print(i<slen ? str[i] : ' ');
-  smartDelay(0);
 }
